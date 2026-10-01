@@ -1018,7 +1018,9 @@ function useAndroidCaretKeyboardLift() {
     };
     const handlePointerUp = () => {
       isPointerPressed = false;
-      requestUpdate();
+      // 延迟到 click 合成之后（下一个宏任务）再收敛 lift：若 pointerup 立即 requestUpdate()，
+      // 会在 Chrome 合成 click 前把按钮移走（applyLift(0)），导致 click 命中错位、发送不触发。
+      window.setTimeout(() => requestUpdate(), 0);
     };
 
     document.addEventListener("focusin", handleFocusIn);
