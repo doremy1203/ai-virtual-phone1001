@@ -126,7 +126,7 @@ import { WidgetRenderer } from "@/components/widgets/widget-renderer";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
-import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
+import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
 import { ensureGlobalBindingDefaults, resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
@@ -134,6 +134,7 @@ import { parseAIResponse } from "@/lib/rich-message-parser";
 import { requestBackgroundChatReply, scheduleFollowUp } from "@/lib/follow-up-service";
 import { CHAT_MESSAGE_NOTICE_EVENT, CHAT_OPEN_SESSION_EVENT, type ChatMessageNoticeDetail } from "@/lib/chat-notification-events";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
+import { installChatSoundListener, playChatSoundOnce, setMiniChatSoundSessionId, startChatSoundLoop } from "@/lib/chat-sound";
 import { setMascotContext } from "@/lib/mascot-context";
 import { DESKTOP_WIDGETS_CHANGED_EVENT } from "@/lib/mascot-events";
 import { useWeixinBridge } from "@/lib/use-weixin-bridge";
@@ -906,6 +907,16 @@ function measureTextareaCaretRect(textarea: HTMLTextAreaElement): KeyboardTarget
 }
 
 function getKeyboardTargetRect(element: HTMLElement): KeyboardTargetRect {
+  // 聊天输入栏 / 多选栏是“上输入框、下发送按钮”的竖向结构。
+  // 抬高的目标必须是整条栏子的 bottom（含发送按钮），而不是文字光标那一行，
+  // 否则只把输入框顶部抬到键盘上方、发送按钮仍被键盘盖住。
+  const inputBar = element.closest<HTMLElement>("[data-ui='input'], [data-ui='multi-select']");
+  if (inputBar) {
+    const rect = inputBar.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom };
+  }
+
+  // 其它独立输入框（设置项、文件夹重命名等）没有底部按钮，仍按原逻辑抬光标。
   if (element instanceof HTMLTextAreaElement) {
     return measureTextareaCaretRect(element);
   }
@@ -922,37 +933,23 @@ function useAndroidCaretKeyboardLift() {
     if (typeof window === "undefined" || typeof document === "undefined") return;
 
     const root = document.documentElement;
-
     if (!/Android/i.test(navigator.userAgent)) {
       root.style.removeProperty("--mobile-keyboard-lift");
       return;
     }
 
-    // 不要把设备限制得太死，Android Chrome / WebView / PWA 都允许进入
-    const mobileMq = window.matchMedia(
-      "(max-width: 700px) and (hover: none) and (pointer: coarse)"
-    );
-
+    const mobileMq = window.matchMedia("(max-width: 500px) and (hover: none) and (pointer: coarse)");
     const viewport = window.visualViewport;
-
-    if (!viewport) return;
-
+    let focusedElement: HTMLElement | null = null;
     let raf = 0;
     let currentLift = 0;
-    let focusedElement: HTMLElement | null = null;
 
     const applyLift = (nextLift: number) => {
       const rounded = Math.max(0, Math.round(nextLift));
-
       if (Math.abs(rounded - currentLift) < 2) return;
-
       currentLift = rounded;
-
       if (rounded > 0) {
-        root.style.setProperty(
-          "--mobile-keyboard-lift",
-          `${rounded}px`
-        );
+        root.style.setProperty("--mobile-keyboard-lift", `${rounded}px`);
       } else {
         root.style.removeProperty("--mobile-keyboard-lift");
       }
@@ -960,186 +957,70 @@ function useAndroidCaretKeyboardLift() {
 
     const update = () => {
       raf = 0;
-
-      if (!mobileMq.matches) {
+      const element = focusedElement;
+      if (!element || document.activeElement !== element || !mobileMq.matches || !viewport) {
         applyLift(0);
         return;
       }
 
-      // Android 键盘出现后，visualViewport 会明显缩小
-      const keyboardInset = Math.max(
-        0,
-        window.innerHeight -
-          viewport.height -
-          viewport.offsetTop
-      );
+      const keyboardTop = viewport.offsetTop + viewport.height;
+      const keyboardInset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      const targetRect = getKeyboardTargetRect(element);
+      const gap = 36;
 
-      // 没有键盘
       if (keyboardInset < 80) {
         applyLift(0);
         return;
       }
 
-      /*
-       * 不再只保护 textarea 的光标。
-       *
-       * 你的实际问题是：
-       * 键盘把整个 chat-input-bar（包括发送按钮）压住。
-       *
-       * 所以直接检测整个输入栏的位置。
-       */
-      const inputBar = document.querySelector(
-        ".chat-input-bar"
-      ) as HTMLElement | null;
-
-      if (!inputBar) {
-        applyLift(0);
-        return;
-      }
-
-      const rect = inputBar.getBoundingClientRect();
-
-      const keyboardTop =
-        viewport.offsetTop + viewport.height;
-
-      // 输入栏距离键盘至少留 12px
-      const safeGap = 12;
-
-      /*
-       * 当前输入框底部如果已经进入键盘区域，
-       * 就把整个手机壳向上移动。
-       */
-      const neededLift =
-        rect.bottom + safeGap - keyboardTop;
-
-      if (neededLift > 0) {
-        applyLift(
-          Math.min(
-            keyboardInset,
-            neededLift
-          )
-        );
-      } else {
-        applyLift(0);
-      }
+      const naturalBottom = targetRect.bottom + currentLift;
+      const neededLift = Math.max(0, naturalBottom + gap - keyboardTop);
+      applyLift(Math.min(keyboardInset, neededLift));
     };
 
     const requestUpdate = () => {
-      if (raf) {
-        window.cancelAnimationFrame(raf);
-      }
-
+      if (raf) window.cancelAnimationFrame(raf);
       raf = window.requestAnimationFrame(update);
     };
 
     const handleFocusIn = (event: FocusEvent) => {
       const target = event.target;
-
       if (!isKeyboardEditableElement(target)) return;
-
-      focusedElement = target as HTMLElement;
-
-      /*
-       * Android 键盘弹出不是瞬间完成的，
-       * 所以连续检查几次，避免第一次检测时
-       * visualViewport 还没有缩小。
-       */
+      focusedElement = target;
       requestUpdate();
-
-      window.setTimeout(requestUpdate, 50);
-      window.setTimeout(requestUpdate, 120);
-      window.setTimeout(requestUpdate, 250);
-      window.setTimeout(requestUpdate, 400);
     };
 
     const handleFocusOut = () => {
       focusedElement = null;
+      applyLift(0);
+    };
 
-      // 延迟清除，避免键盘动画结束前闪回
-      window.setTimeout(() => {
-        const keyboardInset = Math.max(
-          0,
-          window.innerHeight -
-            viewport.height -
-            viewport.offsetTop
-        );
-
-        if (keyboardInset < 80) {
-          applyLift(0);
-        }
-      }, 100);
+    const handleCaretMove = () => {
+      if (focusedElement) requestUpdate();
     };
 
     const handleViewportChange = () => {
-      if (focusedElement) {
-        requestUpdate();
-      }
+      if (focusedElement) requestUpdate();
     };
 
-    const handleResize = () => {
-      if (focusedElement) {
-        requestUpdate();
-      }
-    };
-
-    document.addEventListener(
-      "focusin",
-      handleFocusIn
-    );
-
-    document.addEventListener(
-      "focusout",
-      handleFocusOut
-    );
-
-    window.addEventListener(
-      "resize",
-      handleResize
-    );
-
-    viewport.addEventListener(
-      "resize",
-      handleViewportChange
-    );
-
-    viewport.addEventListener(
-      "scroll",
-      handleViewportChange
-    );
+    document.addEventListener("focusin", handleFocusIn);
+    document.addEventListener("focusout", handleFocusOut);
+    document.addEventListener("click", handleCaretMove, true);
+    document.addEventListener("keyup", handleCaretMove, true);
+    document.addEventListener("input", handleCaretMove, true);
+    viewport?.addEventListener("resize", handleViewportChange);
+    viewport?.addEventListener("scroll", handleViewportChange);
 
     return () => {
-      if (raf) {
-        window.cancelAnimationFrame(raf);
-      }
-
-      document.removeEventListener(
-        "focusin",
-        handleFocusIn
-      );
-
-      document.removeEventListener(
-        "focusout",
-        handleFocusOut
-      );
-
-      window.removeEventListener(
-        "resize",
-        handleResize
-      );
-
-      viewport.removeEventListener(
-        "resize",
-        handleViewportChange
-      );
-
-      viewport.removeEventListener(
-        "scroll",
-        handleViewportChange
-      );
-
-      root.style.removeProperty(
-        "--mobile-keyboard-lift"
-      );
+      if (raf) window.cancelAnimationFrame(raf);
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("focusout", handleFocusOut);
+      document.removeEventListener("click", handleCaretMove, true);
+      document.removeEventListener("keyup", handleCaretMove, true);
+      document.removeEventListener("input", handleCaretMove, true);
+      viewport?.removeEventListener("resize", handleViewportChange);
+      viewport?.removeEventListener("scroll", handleViewportChange);
+      root.style.removeProperty("--mobile-keyboard-lift");
     };
   }, []);
 }
@@ -1221,10 +1102,15 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     sessionId: string; type: "voice" | "video"; charName: string; charAvatar: string | null; isGroup?: boolean;
   } | null>(null);
   // 桌面来电横幅显示期间循环振动（开关在聊天主页"语音/视频来电振动"）
+  // + 循环来电铃声（角色专属提示音优先，其余在"全局聊天信息 → 提示音"）
   useEffect(() => {
     if (!incomingCall) return;
-    return startIncomingCallVibration();
+    const stopRingtone = startChatSoundLoop("incomingCall", findChatSessionById(incomingCall.sessionId));
+    const stopVibration = startIncomingCallVibration();
+    return () => { stopRingtone(); stopVibration(); };
   }, [incomingCall]);
+  // 全局聊天提示音（新消息/发送消息）：监听消息落库事件，按各会话配置播放（角色专属优先于全局）
+  useEffect(() => installChatSoundListener(), []);
   const [chatMessageNotice, setChatMessageNotice] = useState<{
     sessionId: string;
     title: string;
@@ -2545,9 +2431,13 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
   const [showMiniChat, setShowMiniChat] = useState(false);
   const [miniSharePayload, setMiniSharePayload] = useState<ChatSharePayload | null>(null);
   const miniSessionRef = useRef<ChatSession | null>(null);
-  const handleMiniChatClose = useCallback(() => setShowMiniChat(false), []);
+  const handleMiniChatClose = useCallback(() => {
+    setShowMiniChat(false);
+    setMiniChatSoundSessionId(null); // 小窗关闭后该会话不再算"实时聊天"
+  }, []);
   const handleMiniChatSessionChange = useCallback((session: ChatSession | null) => {
     miniSessionRef.current = session;
+    setMiniChatSoundSessionId(session?.id ?? null); // 小窗正打开的会话视为实时聊天
   }, []);
   const handleMiniShareDone = useCallback(() => setMiniSharePayload(null), []);
   const handleMiniChatExpand = useCallback(() => {
@@ -2663,7 +2553,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
       const isCurrentMainChat = activeApp === "chat" && activeChatSession?.id === detail.sessionId;
       const isCurrentMiniChat = showMiniChat && miniSessionRef.current?.id === detail.sessionId;
-      if (isCurrentMainChat || isCurrentMiniChat) return;
+      // 测试弹窗（提示音设置里触发）不受“正在实时聊天则不弹横幅”限制
+      if (!detail.isTest && (isCurrentMainChat || isCurrentMiniChat)) return;
 
       const sessions = loadChatSessions();
       const session = sessions.find(s => s.id === detail.sessionId);
@@ -4466,6 +4357,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       onClick={() => {
                         const call = incomingCall;
                         const callLabel = call.type === "voice" ? "语音通话" : "视频通话";
+                        playChatSoundOnce("hangup", findChatSessionById(call.sessionId)); // 拒接也是结束通话：播挂断音
                         pushChatMessage({
                           sessionId: call.sessionId,
                           role: "user",
@@ -4717,9 +4609,11 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                               if (isFolderIconId(iconId)) {
                                 const folder = folders[iconId];
                                 if (!folder) return null;
+                                // 聊天图标不再聚合未读红点：未读提醒只保留在聊天会话列表内
                                 const folderBadge = folder.icons.reduce((sum, memberId) => {
                                   const appId = customAppIdFromIconId(memberId);
-                                  return sum + (appId ? customAppBadges[appId] ?? 0 : 0);
+                                  if (appId) return sum + (customAppBadges[appId] ?? 0);
+                                  return sum;
                                 }, 0);
                                 return (
                                   <button
@@ -4755,6 +4649,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                                 : null;
                               const iconImageUrl = iconSkinUrl || customIconUrl;
                               const hasImageIcon = Boolean(iconImageUrl);
+                              // 聊天图标右上角不显示未读红点（用户偏好）：未读只在聊天会话列表内以红点展示
                               const badgeCount = customApp ? customAppBadges[customApp.id] ?? 0 : 0;
                               return (
                                 <button
