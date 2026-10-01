@@ -1124,9 +1124,13 @@
        .app-root 被裁掉，底部栏随之顶回可视区。上移量可在「状态栏」弹窗里按设备调节，
        让它约等于真实状态栏高度即可铺满。0 = 不上移（iOS 等能全屏的浏览器保持 0）。 */
     margin-top: calc(-1 * var(--status-bar-drop, 0px));
-    transform: translate3d(0, calc(-1 * var(--mobile-keyboard-lift, 0px)), 0);
+    /* 用 2D 的 translateY 代替 translate3d，并移除 will-change：Android Chrome 在键盘
+       弹出驱动 visualViewport 变化时，对「transform + will-change」固定下来的合成层，
+       其触摸命中区不会随视觉位置同步更新——发送按钮看得见却点不中，需手动滑动一次、
+       触发合成层重算才恢复。改为 2D transform 且不再钉住图层，过渡结束后浏览器会
+       重新光栅化并同步命中区，按钮即可直接命中。 */
+    transform: translateY(calc(-1 * var(--mobile-keyboard-lift, 0px)));
     transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
-    will-change: transform;
   }
 
   .phone-shell-wrap .phone-case {
