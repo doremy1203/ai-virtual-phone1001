@@ -597,42 +597,6 @@ function normalizeCustomPanelHeight(value: unknown): string | undefined {
     return undefined;
 }
 
-// ── 【临时调试】发送按钮 hit-test / viewport 坐标 ─────────────────────────
-// 用于定位 Android 键盘抬升后「视觉位置正确却点不中发送按钮」的坐标错位问题。
-// 确认根因后整段（函数 + 下方 useEffect + 事件监听）一并删除。
-function debugLogSendBtn(kind: string, e: { clientX: number; clientY: number; target: EventTarget | null }) {
-    if (typeof window === "undefined") return;
-    const x = e.clientX;
-    const y = e.clientY;
-    const t = e.target instanceof Element ? e.target : null;
-    const btn = t?.closest('button[aria-label^="发送"], button[aria-label*="停止本轮"]') ?? null;
-    const rect = btn ? btn.getBoundingClientRect() : null;
-    const vv = window.visualViewport;
-    let elementAtPoint: string | null = null;
-    let elementsAtPoint: string[] = [];
-    try {
-        const el = document.elementFromPoint(x, y);
-        elementAtPoint = el
-            ? `${el.tagName}.${String((el as HTMLElement).className ?? "").split(" ").join(".")}`
-            : null;
-        elementsAtPoint = document.elementsFromPoint(x, y).slice(0, 4).map((n) =>
-            `${n.tagName}${(n as HTMLElement).className ? "." + String((n as HTMLElement).className).split(" ").join(".") : ""}`
-        );
-    } catch {
-        /* ignore */
-    }
-    console.log("[send-btn-debug]", kind, JSON.stringify({
-        pointer: { clientX: x, clientY: y },
-        isSendBtnTarget: !!btn,
-        rect: rect ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom } : null,
-        visualViewport: vv ? { height: vv.height, offsetTop: vv.offsetTop, offsetLeft: vv.offsetLeft, pageTop: vv.pageTop } : null,
-        scrollY: window.scrollY,
-        innerHeight: window.innerHeight,
-        elementAtPoint,
-        elementsAtPoint,
-    }));
-}
-
 const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     characterName: string;
     characterId: string;
@@ -698,22 +662,6 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
 }, ref) {
     const [inputText, setInputText] = useState("");
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-
-    // 【临时调试】监听 pointerdown/pointerup/click（捕获阶段），排查发送按钮 hit-test 错位
-    useEffect(() => {
-        if (typeof window === "undefined") return;
-        const onDown = (e: PointerEvent) => debugLogSendBtn("pointerdown", e);
-        const onUp = (e: PointerEvent) => debugLogSendBtn("pointerup", e);
-        const onClick = (e: MouseEvent) => debugLogSendBtn("click", e);
-        document.addEventListener("pointerdown", onDown, true);
-        document.addEventListener("pointerup", onUp, true);
-        document.addEventListener("click", onClick, true);
-        return () => {
-            document.removeEventListener("pointerdown", onDown, true);
-            document.removeEventListener("pointerup", onUp, true);
-            document.removeEventListener("click", onClick, true);
-        };
-    }, []);
 
     // 表情包搜索联想：ESC/失焦置 true 隐藏，输入变化重新开启
     const [suggestClosed, setSuggestClosed] = useState(false);
@@ -892,6 +840,8 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                 </button>
                 <button
                     onClick={handleSubmit}
+                    onPointerDown={(e) => e.preventDefault()}
+                    tabIndex={-1}
                     disabled={!isGenerating && (inputLocked || !inputText.trim())}
                     style={inputLocked && !isGenerating ? { opacity: 0.35 } : undefined}
                     className="ui-bare-btn text-[var(--c-text)]"
@@ -911,6 +861,8 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                     <button
                         className="ui-bare-btn text-[var(--c-text)]"
                         title={!inputLocked && inputText.trim() ? "发送输入框内容并触发回复" : "触发 AI 主动回复"}
+                        onPointerDown={(e) => e.preventDefault()}
+                        tabIndex={-1}
                         onClick={() => {
                             const trimmed = inputText.trim();
                             // 输入框已有文字：发送输入框内容并立即触发模型回复（一次按键完成），
@@ -1108,6 +1060,8 @@ const OfflineTextInputBar = memo(forwardRef<OfflineTextInputHandle, {
                 <button
                     type="button"
                     onClick={() => { if (isOfflineGenerating) onStopGeneration(); else handleSubmit(); }}
+                    onPointerDown={(e) => e.preventDefault()}
+                    tabIndex={-1}
                     disabled={!isOfflineGenerating && !isSpectator && !inputText.trim()}
                     className="ui-bare-btn text-[var(--c-text)]"
                     aria-label={isOfflineGenerating ? "停止线下生成" : "发送"}
