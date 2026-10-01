@@ -997,7 +997,10 @@ function useAndroidCaretKeyboardLift() {
 
     const handleFocusOut = () => {
       focusedElement = null;
-      applyLift(0);
+      // 必须走 requestUpdate()（受 isPointerPressed 冻结守卫约束），而不能直接 applyLift(0)。
+      // 否则点击发送按钮触发 textarea 失焦时，会在 pointerdown→pointerup 之间同步清掉 lift，
+      // 把按钮顶走数十像素，导致 click 命中错位、发送不触发。
+      requestUpdate();
     };
 
     const handleCaretMove = () => {
