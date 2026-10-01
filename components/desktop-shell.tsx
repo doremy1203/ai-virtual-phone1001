@@ -943,10 +943,6 @@ function useAndroidCaretKeyboardLift() {
     let focusedElement: HTMLElement | null = null;
     let raf = 0;
     let currentLift = 0;
-    // 指针按压冻结：当手指已按下时禁止改写 --mobile-keyboard-lift，避免 tap 期间
-    // (pointerdown→pointerup) 触发 focusout/click 导致按钮被顶走、click 命中坐标错位。
-    let isPointerPressed = false;
-    let pointerUpTimeout = 0;
 
     const applyLift = (nextLift: number) => {
       const rounded = Math.max(0, Math.round(nextLift));
@@ -961,8 +957,6 @@ function useAndroidCaretKeyboardLift() {
 
     const update = () => {
       raf = 0;
-      // 按压期间冻结，compose lift 延迟到 pointerup 后再应用，避免点击命中错位
-      if (isPointerPressed) return;
       const element = focusedElement;
       if (!element || document.activeElement !== element || !mobileMq.matches || !viewport) {
         applyLift(0);
@@ -991,16 +985,17 @@ function useAndroidCaretKeyboardLift() {
 
     const handleFocusIn = (event: FocusEvent) => {
       const target = event.target;
-      if (!isKeyboardEditableElement(target)) return;
+      if (!isKeyboardEditableElement(target)) {
+        return;
+      }
       focusedElement = target;
       requestUpdate();
     };
 
     const handleFocusOut = () => {
       focusedElement = null;
-      // 必须走 requestUpdate()（受 isPointerPressed 冻结守卫约束），而不能直接 applyLift(0)。
-      // 否则点击发送按钮触发 textarea 失焦时，会在 pointerdown→pointerup 之间同步清掉 lift，
-      // 把按钮顶走数十像素，导致 click 命中错位、发送不触发。
+      // 失焦统一走 requestUpdate()：由 update() 依据当前状态清掉 lift（移除 --mobile-keyboard-lift）。
+      // 抬升已改用 margin-top（真实布局位移）实现，hit-test 始终与视觉同步，不再需要同步 applyLift(0)。
       requestUpdate();
     };
 
@@ -1012,55 +1007,21 @@ function useAndroidCaretKeyboardLift() {
       if (focusedElement) requestUpdate();
     };
 
-    // 指针按压守卫：按下时冻结 lift 更新。
-    // 关键：解冻必须发生在 click 合成之后（click 捕获阶段），而不是 pointerup。
-    // 若在 pointerup 解冻，排队中的 update()（focusout/visualViewport.resize/click 捕获的 handleCaretMove）
-    // 会在 Chrome 合成 click 之前把按钮移走，导致 click 命中错位、发送不触发。
-    const handlePointerDown = () => {
-      isPointerPressed = true;
-      if (raf) window.cancelAnimationFrame(raf);
-      if (pointerUpTimeout) window.clearTimeout(pointerUpTimeout);
-    };
-    const handlePostClickCapture = () => {
-      // click 已合成且已完成首次派发，此刻解冻最安全
-      if (pointerUpTimeout) window.clearTimeout(pointerUpTimeout);
-      pointerUpTimeout = 0;
-      isPointerPressed = false;
-      requestUpdate();
-    };
-    const handlePointerUp = () => {
-      // 不要在此解冻。留一个超时兜底：万一没有 click（如点非按钮区域/手势取消），
-      // 键盘收起/滚动等仍需要 lift 收敛，300ms 后强制解冻。
-      if (pointerUpTimeout) window.clearTimeout(pointerUpTimeout);
-      pointerUpTimeout = window.setTimeout(() => {
-        pointerUpTimeout = 0;
-        isPointerPressed = false;
-        requestUpdate();
-      }, 300);
-    };
-
     document.addEventListener("focusin", handleFocusIn);
     document.addEventListener("focusout", handleFocusOut);
-    document.addEventListener("click", handlePostClickCapture, true);
+    document.addEventListener("click", handleCaretMove, true);
     document.addEventListener("keyup", handleCaretMove, true);
     document.addEventListener("input", handleCaretMove, true);
-    document.addEventListener("pointerdown", handlePointerDown, true);
-    document.addEventListener("pointerup", handlePointerUp, true);
-    document.addEventListener("pointercancel", handlePointerUp, true);
     viewport?.addEventListener("resize", handleViewportChange);
     viewport?.addEventListener("scroll", handleViewportChange);
 
     return () => {
       if (raf) window.cancelAnimationFrame(raf);
-      if (pointerUpTimeout) window.clearTimeout(pointerUpTimeout);
       document.removeEventListener("focusin", handleFocusIn);
       document.removeEventListener("focusout", handleFocusOut);
-      document.removeEventListener("click", handlePostClickCapture, true);
+      document.removeEventListener("click", handleCaretMove, true);
       document.removeEventListener("keyup", handleCaretMove, true);
       document.removeEventListener("input", handleCaretMove, true);
-      document.removeEventListener("pointerdown", handlePointerDown, true);
-      document.removeEventListener("pointerup", handlePointerUp, true);
-      document.removeEventListener("pointercancel", handlePointerUp, true);
       viewport?.removeEventListener("resize", handleViewportChange);
       viewport?.removeEventListener("scroll", handleViewportChange);
       root.style.removeProperty("--mobile-keyboard-lift");
