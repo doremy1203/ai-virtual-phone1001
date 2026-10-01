@@ -946,6 +946,7 @@ function useAndroidCaretKeyboardLift() {
     // 指针按压冻结：当手指已按下时禁止改写 --mobile-keyboard-lift，避免 tap 期间
     // (pointerdown→pointerup) 触发 focusout/click 导致按钮被顶走、click 命中坐标错位。
     let isPointerPressed = false;
+    let pointerUpTimeout = 0;
 
     const applyLift = (nextLift: number) => {
       const rounded = Math.max(0, Math.round(nextLift));
@@ -1011,21 +1012,36 @@ function useAndroidCaretKeyboardLift() {
       if (focusedElement) requestUpdate();
     };
 
-    // 指针按压守卫：按下时冻结 lift 更新，抬起后补一次最终 lift
+    // 指针按压守卫：按下时冻结 lift 更新。
+    // 关键：解冻必须发生在 click 合成之后（click 捕获阶段），而不是 pointerup。
+    // 若在 pointerup 解冻，排队中的 update()（focusout/visualViewport.resize/click 捕获的 handleCaretMove）
+    // 会在 Chrome 合成 click 之前把按钮移走，导致 click 命中错位、发送不触发。
     const handlePointerDown = () => {
       isPointerPressed = true;
       if (raf) window.cancelAnimationFrame(raf);
+      if (pointerUpTimeout) window.clearTimeout(pointerUpTimeout);
+    };
+    const handlePostClickCapture = () => {
+      // click 已合成且已完成首次派发，此刻解冻最安全
+      if (pointerUpTimeout) window.clearTimeout(pointerUpTimeout);
+      pointerUpTimeout = 0;
+      isPointerPressed = false;
+      requestUpdate();
     };
     const handlePointerUp = () => {
-      isPointerPressed = false;
-      // 延迟到 click 合成之后（下一个宏任务）再收敛 lift：若 pointerup 立即 requestUpdate()，
-      // 会在 Chrome 合成 click 前把按钮移走（applyLift(0)），导致 click 命中错位、发送不触发。
-      window.setTimeout(() => requestUpdate(), 0);
+      // 不要在此解冻。留一个超时兜底：万一没有 click（如点非按钮区域/手势取消），
+      // 键盘收起/滚动等仍需要 lift 收敛，300ms 后强制解冻。
+      if (pointerUpTimeout) window.clearTimeout(pointerUpTimeout);
+      pointerUpTimeout = window.setTimeout(() => {
+        pointerUpTimeout = 0;
+        isPointerPressed = false;
+        requestUpdate();
+      }, 300);
     };
 
     document.addEventListener("focusin", handleFocusIn);
     document.addEventListener("focusout", handleFocusOut);
-    document.addEventListener("click", handleCaretMove, true);
+    document.addEventListener("click", handlePostClickCapture, true);
     document.addEventListener("keyup", handleCaretMove, true);
     document.addEventListener("input", handleCaretMove, true);
     document.addEventListener("pointerdown", handlePointerDown, true);
@@ -1036,9 +1052,10 @@ function useAndroidCaretKeyboardLift() {
 
     return () => {
       if (raf) window.cancelAnimationFrame(raf);
+      if (pointerUpTimeout) window.clearTimeout(pointerUpTimeout);
       document.removeEventListener("focusin", handleFocusIn);
       document.removeEventListener("focusout", handleFocusOut);
-      document.removeEventListener("click", handleCaretMove, true);
+      document.removeEventListener("click", handlePostClickCapture, true);
       document.removeEventListener("keyup", handleCaretMove, true);
       document.removeEventListener("input", handleCaretMove, true);
       document.removeEventListener("pointerdown", handlePointerDown, true);
