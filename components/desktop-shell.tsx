@@ -943,6 +943,9 @@ function useAndroidCaretKeyboardLift() {
     let focusedElement: HTMLElement | null = null;
     let raf = 0;
     let currentLift = 0;
+    // 指针按压冻结：当手指已按下时禁止改写 --mobile-keyboard-lift，避免 tap 期间
+    // (pointerdown→pointerup) 触发 focusout/click 导致按钮被顶走、click 命中坐标错位。
+    let isPointerPressed = false;
 
     const applyLift = (nextLift: number) => {
       const rounded = Math.max(0, Math.round(nextLift));
@@ -957,6 +960,8 @@ function useAndroidCaretKeyboardLift() {
 
     const update = () => {
       raf = 0;
+      // 按压期间冻结，compose lift 延迟到 pointerup 后再应用，避免点击命中错位
+      if (isPointerPressed) return;
       const element = focusedElement;
       if (!element || document.activeElement !== element || !mobileMq.matches || !viewport) {
         applyLift(0);
@@ -1003,11 +1008,24 @@ function useAndroidCaretKeyboardLift() {
       if (focusedElement) requestUpdate();
     };
 
+    // 指针按压守卫：按下时冻结 lift 更新，抬起后补一次最终 lift
+    const handlePointerDown = () => {
+      isPointerPressed = true;
+      if (raf) window.cancelAnimationFrame(raf);
+    };
+    const handlePointerUp = () => {
+      isPointerPressed = false;
+      requestUpdate();
+    };
+
     document.addEventListener("focusin", handleFocusIn);
     document.addEventListener("focusout", handleFocusOut);
     document.addEventListener("click", handleCaretMove, true);
     document.addEventListener("keyup", handleCaretMove, true);
     document.addEventListener("input", handleCaretMove, true);
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("pointerup", handlePointerUp, true);
+    document.addEventListener("pointercancel", handlePointerUp, true);
     viewport?.addEventListener("resize", handleViewportChange);
     viewport?.addEventListener("scroll", handleViewportChange);
 
@@ -1018,6 +1036,9 @@ function useAndroidCaretKeyboardLift() {
       document.removeEventListener("click", handleCaretMove, true);
       document.removeEventListener("keyup", handleCaretMove, true);
       document.removeEventListener("input", handleCaretMove, true);
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("pointerup", handlePointerUp, true);
+      document.removeEventListener("pointercancel", handlePointerUp, true);
       viewport?.removeEventListener("resize", handleViewportChange);
       viewport?.removeEventListener("scroll", handleViewportChange);
       root.style.removeProperty("--mobile-keyboard-lift");
